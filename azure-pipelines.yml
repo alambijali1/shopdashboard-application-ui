@@ -1,0 +1,185 @@
+trigger:
+  branches:
+    include:
+      - main
+
+#Note- I used Microsoft hosted agent so I created a single stage for BUILD & PUSH IMAGE because,we need scanned Image.
+pool: 
+  vmImage: 'ubuntu-latest'
+
+variables:
+  imageName: 'shopdashboard'
+  acrRegistry: 'xyz.azurecr.io'
+
+
+# ============================
+# BUILD & PUSH IMAGE
+# ============================
+stages:
+- stage: BuildScanAndPush
+  displayName: Build & Push 
+  jobs:
+  - job: BuildJob
+    steps:
+    - checkout: self
+
+    # Build for scan
+    - task: Docker@2
+      displayName: Build Image for scan
+      inputs:
+        command: 'build'
+        repository: $(acrRegistry)/$(imageName)
+        Dockerfile: '**/Dockerfile'
+        tags: |
+          $(Build.BuildId)
+          latest
+
+    # Scan Build Image
+    - task: trivy@1
+      displayName: Scan Image
+      inputs:
+        version: '0.57.0'
+        type: 'image'
+        image: '$(acrRegistry)/$(imageName):$(Build.BuildId)'
+        severities: 'CRITICAL,HIGH'
+        ignoreUnfixed: true
+        sarifOutput: true
+
+    # Push Scanned Image
+    - task: Docker@2
+      displayName: Push Image to acr
+      condition: always() #succeeded() Conditions modify as per requirement
+      inputs:
+        containerRegistry: 'acr'
+        repository: $(imageName)
+        command: push
+        tags: |
+          $(Build.BuildId)
+          latest
+          
+    # Output for next stage
+    - task: Bash@3
+      name: ImageTagValue
+      condition: always() #succeeded() Conditions modify as per requirement
+      displayName: Image Tag Output
+      inputs:
+        targetType: inline
+        script: echo "##vso[task.setvariable variable=imageTag;isOutput=true]$(Build.BuildId)"
+
+# =============================================
+# UPDATE Image tag in our rollout manifest file
+# =============================================
+
+- stage: Updateimagetag
+  displayName: Image tag update
+  dependsOn: BuildScanAndPush
+  condition: always() #succeeded() Conditions modify as per requirement
+
+  variables:
+    imageTag: $[ stageDependencies.BuildScanAndPush.BuildJob.outputs['ImageTagValue.imageTag'] ]
+
+  jobs:
+  - job: Imagetag
+    displayName: Commit Updated Image Tag
+    steps:
+    - task: Bash@3
+      env:
+        GITHUB_PAT: $(GITHUB_PAT) #Note If you want to use Azure repos then use ADO PAT token
+      displayName: Clone & Update Rollout Image Tag
+      inputs:
+        targetType: inline
+        script: |
+          export GIT_CLONE_DIR="gitops-local"
+
+          echo "Configuring git"
+          git config --global user.email "alambijali9@gmail.com"
+          git config --global user.name "Alam"
+
+          echo "Cloning GitOps repo"
+          GIT_URL="https://x:${GITHUB_PAT}@github.com/alambijali1/shopdashboard-helm.git"
+          git clone $GIT_URL $GIT_CLONE_DIR
+          cd $GIT_CLONE_DIR
+          git checkout main
+
+          echo "Updating image tag in dev.values.yaml"
+
+          NEW_TAG="$(imageTag)"
+
+          #KEY CHANGE: Update ONLY the image tag in manifest
+          sed -i "s|tag: .*|tag: \"${NEW_TAG}\"|" dev.values.yaml
+
+          echo "Committing changes..."
+
+          git add dev.values.yaml
+          git commit -m "Update image tag to ${NEW_TAG}" || echo "No changes"
+          git push origin main
+
+          echo "Done — ArgoCD will sync Helm chart"
+
+# =================================================
+# TRAFFIC SWITCH STEP USING ARGO ROLLOUTS
+# =================================================        
+
+- stage: Promote
+  displayName: "Blue → Green Promotion Stage"
+  dependsOn: Updateimagetag
+  condition: succeeded()
+
+  # Manual Approval Task
+  jobs:
+  - job: Approval
+    displayName: "Approval Before Traffic Switch"
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 60
+      displayName: "Approval Required Before Switching Traffic"
+      inputs:
+        notifyUsers: 'abcd@gmail.com'
+        instructions: 'The new version will deployed to /staging. Verify and approve to switch LIVE traffic to the new version.'
+
+  # Switch Traffic rollout
+  - job: PromoteRollout
+    displayName: " (Switch Traffic)"
+    dependsOn: Approval   # Runs only after approval
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: none
+
+    # Step 1: Install Argo Rollouts CLI
+    - task: Bash@3
+      displayName: "Install Argo Rollouts CLI"
+      inputs:
+        targetType: inline
+        script: |
+          curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+          chmod +x kubectl-argo-rollouts-linux-amd64
+          sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+          kubectl-argo-rollouts version
+
+    # Step 2: Configure kubectl to use AKS cluster
+    - task: AzureCLI@2
+      displayName: "Get AKS Credentials"
+      inputs:
+        azureSubscription: 'Pay-As-You-Go(5ac653er-41d5-4326-ae6d-2047d4d178ak)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group demo --name test-aks-cluster --overwrite-existing
+
+    # Step 3: Promote rollout
+    - task: Bash@3
+      displayName: "Promote Argo Rollout"
+      inputs:
+        targetType: inline
+        script: |
+          kubectl-argo-rollouts promote shopdashboard -n ui
+
+    # Step 4: Confirmation
+    - task: Bash@3
+      displayName: "Promotion Confirmation"
+      inputs:
+        targetType: inline
+        script: |
+          echo "Promotion complete. Argo Rollouts switched traffic successfully."
