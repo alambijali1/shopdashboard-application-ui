@@ -92,7 +92,7 @@ stages:
           export GIT_CLONE_DIR="gitops-local"
 
           echo "Configuring git"
-          git config --global user.email "alambijali9@gmail.com"
+          git config --global user.email "abc@gmail.com"
           git config --global user.name "Alam"
 
           echo "Cloning GitOps repo"
