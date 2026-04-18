@@ -135,7 +135,7 @@ stages:
       timeoutInMinutes: 60
       displayName: "Approval Required Before Switching Traffic"
       inputs:
-        notifyUsers: 'abcd@gmail.com'
+        notifyUsers: 'alambijali5@gmail.com'
         instructions: 'The new version will deployed to /staging. Verify and approve to switch LIVE traffic to the new version.'
 
   # Switch Traffic rollout
@@ -162,11 +162,11 @@ stages:
     - task: AzureCLI@2
       displayName: "Get AKS Credentials"
       inputs:
-        azureSubscription: 'Pay-As-You-Go(5ac653er-41d5-4326-ae6d-2047d4d178ak)'
+        azureSubscription: 'Pay-As-You-Go(298edaea-624a-47f4-98f9-cc2a52a0b622)'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          az aks get-credentials --resource-group demo --name test-aks-cluster --overwrite-existing
+          az aks get-credentials --resource-group rg --name test --overwrite-existing
 
     # Step 3: Promote rollout
     - task: Bash@3
